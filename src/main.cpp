@@ -36,7 +36,7 @@ constexpr size_t INVALID_COMPONENT_INDEX = ~0u;
 
 enum definition_type {
     DEFINITION_TYPE_COMPONENT,
-    DEFINITION_TYPE_BASE_TYPE,
+    DEFINITION_TYPE_MEMBER,
     DEFINITION_TYPE_ID,
     DEFINITION_TYPE_FUNCTION,
     DEFINITION_TYPE_END,
@@ -70,44 +70,45 @@ string generate_c_start_code(const vector<definition_info>& definitions) {
     "#define MAX_ENTITY_COUNT 1024\n"
     "typedef size_t id_t;\ntypedef struct component_info {\n"
     "\tint exist;\n"
-    "\tsize_t* data;\n"
+    "\tchar* data;\n"
     "\tsize_t dataSize;\n"
     "} component_info;\n"
-    "typedef struct tiny_mask_vector {\n"
-    "\tint owned[MAX_ENTITY_COUNT];\n"
-    "\tsize_t ownedCount;\n"
-    "} tiny_mask_vector;\n"
     "static component_info componentsData[COMPONENT_COUNT][MAX_ENTITY_COUNT] = {};\n"
     "static id_t max_id = 0;\n"
     "static id_t freeIDs[MAX_ENTITY_COUNT] = {};\n"
-    "static size_t freeIDCount = 0;\n"
-    "static tiny_mask_vector masks[COMPONENT_COUNT] = {};\n";
+    "static size_t freeIDCount = 0;\n";
 }
 string generate_c_after_components_definition(const vector<definition_info>& definitions) {
     string destroyComponentSector;
     string addComponentSector;
+    string getComponentSector;
     bool firstCompDef = true;
     for (const auto& i : definitions) {
         if (i.componentID != INVALID_COMPONENT_INDEX) {
             const string componentIDStr = std::to_string(i.componentID);
             destroyComponentSector +=
-            (firstCompDef ? string("\t\t\t\t") : string("\t\t\t\telse ")) + "if (i == " + componentIDStr +") {\n"
-            "\t\t\t\t\t" + i.name + "_destroy((" + i.name + "*)componentsData[i][entity].data);\n"
-            "\t\t\t\t}\n";
+            (firstCompDef ? string("\t\t\t") : string("\t\t\telse ")) + "if (i == " + componentIDStr +") {\n"
+            "\t\t\t\t" + i.name + "_destroy((" + i.name + "*)componentsData[i][entity].data);\n"
+            "\t\t\t}\n";
             firstCompDef = false;
 
             addComponentSector +=
             "void add_" + i.name + "(id_t entity) {\n"
-            "\tmasks[" + componentIDStr + "].owned[masks[" + componentIDStr + "].ownedCount] = entity;\n"
-            "\t++masks[" + componentIDStr + "].ownedCount;\n"
-            "\tconst size_t dataSize = ((sizeof(" + i.name + ") / sizeof(size_t)) + (sizeof(" + i.name + ") % sizeof(size_t) == 0 ? 0 : 1)) * sizeof(size_t);\n"
-            "\tif (componentsData[" + componentIDStr + "][entity].data == 0) {\n"
-            "\t\tcomponentsData[" + componentIDStr + "][entity].data = (size_t*)malloc(dataSize);\n"
-            "\t\tcomponentsData[" + componentIDStr + "][entity].dataSize = dataSize;\n"
-            "\t}\n"
-            "\tfor (size_t i = 0u; i < dataSize / sizeof(size_t); ++i)\n"
-            "\t\tcomponentsData[" + componentIDStr + "][entity].data[i] = 0;\n"
             "\tcomponentsData[" + componentIDStr + "][entity].exist = 1;\n"
+            "\tif (componentsData[" + componentIDStr + "][entity].data == 0) {\n"
+            "\t\tcomponentsData[" + componentIDStr + "][entity].data = malloc(sizeof(" + i.name + "));\n"
+            "\t\tcomponentsData[" + componentIDStr + "][entity].dataSize = sizeof(" + i.name + ");\n"
+            "\t}\n"
+            "\tfor (size_t i = 0u; i < sizeof(" + i.name + "); ++i)\n"
+            "\t\tcomponentsData[" + componentIDStr + "][entity].data[i] = 0;\n"
+            "}\n"
+            "\n";
+
+            getComponentSector +=
+            i.name + "* get_" + i.name + "(id_t entity) {\n"
+            "\tif (componentsData[" + componentIDStr + "][entity].exist == 0)\n"
+            "\t\treturn 0;\n"
+            "\treturn (" + i.name + "*)componentsData[" + componentIDStr + "][entity].data;\n"
             "}\n"
             "\n";
         }
@@ -124,16 +125,11 @@ string generate_c_after_components_definition(const vector<definition_info>& def
     "\t}\n"
     "}\n"
     "\n"
-    "void destroy_entity(const id_t entity) {\n"
+    "void destroy_entity(id_t entity) {\n"
     "\tfor (size_t i = 0u; i < COMPONENT_COUNT; ++i) {\n"
-    "\t\tfor (size_t j = 0u; j < masks[i].ownedCount; ++j) {\n"
-    "\t\t\tif (masks[i].owned[j] == entity) {\n"
-    "\t\t\t\t--masks[i].ownedCount;\n"
-    "\t\t\t\tmasks[i].owned[j] = masks[i].owned[masks[i].ownedCount];\n"
-    "\t\t\t\tcomponentsData[i][entity].exist = 0;\n"
+    "\t\tif (componentsData[i][entity].exist) {\n"
+    "\t\t\tcomponentsData[i][entity].exist = 0;\n"
     + destroyComponentSector +
-    "\t\t\t\tbreak;\n"
-    "\t\t\t}\n"
     "\t\t}\n"
     "\t}\n"
     "\tfreeIDs[freeIDCount] = entity;\n"
@@ -142,15 +138,16 @@ string generate_c_after_components_definition(const vector<definition_info>& def
     "\n"
     "void cleanup() {\n"
     "\tfor (size_t i = 0u; i < COMPONENT_COUNT; ++i) {\n"
-    "\t\tfor (size_t j = 0u; j < masks[i].ownedCount; ++j) {\n"
-    "\t\t\tif (componentsData[i][j].data != 0) {\n"
+    "\t\tfor (size_t j = 0u; j < max_id; ++j) {\n"
+    "\t\t\tif (componentsData[i][j].exist && componentsData[i][j].data != 0) {\n"
     "\t\t\t\tfree(componentsData[i][j].data);\n"
     "\t\t\t}\n"
     "\t\t}\n"
     "\t}\n"
     "}\n"
     "\n"
-    + addComponentSector;
+    + addComponentSector
+    + getComponentSector;
 }
 string generate_c_destroy_some(const definition_info& definition) {
     if (definition.parentID == INVALID_PARENT_INDEX)
@@ -172,7 +169,7 @@ string generate_c_structures(const vector<definition_info>& definitions) {
 
             string destroyMembersSector;
             ++i;
-            for (; (i < definitions.size()) && (definitions[i].componentID == INVALID_COMPONENT_INDEX) && (definitions[i].parentID != INVALID_PARENT_INDEX); ++i) {
+            for (; (i < definitions.size()) && (definitions[i].type == DEFINITION_TYPE_MEMBER); ++i) {
                 result += "\t" + definitions[i].typeSpec + " " + definitions[i].name + ";\n";
                 destroyMembersSector += "\t" + generate_c_destroy_some(definitions[i]);
             }
@@ -215,7 +212,27 @@ string generate_c_program_exit() {
     "// program exit\n"
     "cleanup();\n";
 }
+string generate_c_foreach(const string& iteratorName, const vector<string>& components, const vector<definition_info>& definitions) {
+    string checkSector;
+    for (size_t ci = 0; ci < components.size(); ++ci) {
+        const auto& c = components[ci];
+        for (const auto& d : definitions) {
+            if ((d.componentID != INVALID_COMPONENT_INDEX) && (c == d.name)) {
+                const string strComponentID = std::to_string(d.componentID);
+                checkSector += "!componentsData[" + strComponentID + "][" + iteratorName + "].exist" + (ci == (components.size() - 1) ? string("") : string(" || "));
+            }
+        }
+    }
 
+    return 
+    "// foreach " + iteratorName + " [components] { your shitty(my) code }\n"
+    "for (size_t " + iteratorName + " = 0u; " + iteratorName + " < max_id; ++" + iteratorName + ") {\n"
+    "\tif (" + checkSector+ ")\n"
+    "\t\tcontinue;\n"
+    "\t\n"
+    "\t//code\n"
+    "}\n";
+}
 void parse_definitions(const string& data, vector<definition_info>& definitions) {
     sxt::tokenizer<string> tokenizer(data.begin(), data.end());
     vector<sxt::value_token<string>> tokens;
@@ -250,7 +267,7 @@ void parse_definitions(const string& data, vector<definition_info>& definitions)
 
         } else if (expected_type == EXPECTED_TYPE_COMPONENT_MEMBER_DEFINITION_TYPE) {
             if (i.type() == sxt::STX_TOKEN_TYPE_WORD)  {
-                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_BASE_TYPE, .typeSpec = i.value(), .name = "", .parentID = currentComponentID, .componentID = INVALID_COMPONENT_INDEX});
+                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_MEMBER, .typeSpec = i.value(), .name = "", .parentID = currentComponentID, .componentID = INVALID_COMPONENT_INDEX});
 
                 ++ii;
                 definitions.back().name = ii->value();
@@ -309,6 +326,7 @@ int main() {
     std::cout << generate_c_create_ent_with_name("first");
     std::cout << generate_c_create_add("first", "position", definitions);
     std::cout << generate_c_create_add("first", "velocity", definitions);
+    std::cout << generate_c_foreach("entity", {"position", "velocity"}, definitions);
     std::cout << generate_c_destroy_entity("first", definitions);
     std::cout << generate_c_program_exit();
     std::cout << "}";
