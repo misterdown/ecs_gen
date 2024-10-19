@@ -1,3 +1,28 @@
+/*  sxt_head.hpp
+    MIT License
+
+    Copyright (c) 2024 Aidar Shigapov
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+*/
+
 #ifndef SXT_HEAD_HPP
 #   define SXT_HEAD_HPP 1
 #if (!(defined SXT_ISDIGIT)) || (!(defined SXT_ISALPHA)) || (!(defined SXT_ISSAPCE))
@@ -5,30 +30,36 @@
 #if (defined SXT_ISDIGIT) || (defined SXT_ISALPHA) || (defined SXT_ISSAPCE)
     static_assert(0, "define SXT_ISDIGIT, SXT_ISALPHA and SXT_ISSAPCE if you defined one of them");
 #endif // defined SXT_ISDIGIT || defined SXT_ISALPHA || defined SXT_ISSAPCE
-#   include <locale> // for isalpha, isspace
-#   define SXT_ISDIGIT(c__) (::std::isdigit(c__))
-#   define SXT_ISALPHA(c__) (::std::isalpha(c__))
-#   define SXT_ISSAPCE(c__) (::std::isspace(c__))
+#   include <locale>
+#   define SXT_ISDIGIT(c__) (std::isdigit(c__))
+#   define SXT_ISALPHA(c__) (std::isalpha(c__))
+#   define SXT_ISSAPCE(c__) (std::isspace(c__))
 #endif // !defined SXT_ISDIGIT || !defined SXT_ISALPHA || !defined SXT_ISSAPCE
-#if (!(defined SXR_DEFAULT_CHAR_TRAITS))
-#   include <type_traits> // for char_traits
-#   define SXR_DEFAULT_CHAR_TRAITS ::std::char_traits
-#endif // !defined SXR_DEFAULT_CHAR_TRAITS
+
+#if (!(defined SXT_DEFAULT_CHAR_TRAITS))
+#   include <type_traits>
+#   define SXT_DEFAULT_CHAR_TRAITS std::char_traits
+#endif // !defined SXT_DEFAULT_CHAR_TRAITS
 
 #if (!(defined SXT_ASSERT))
 #   include <cassert>
 #   define SXT_ASSERT(expr__) assert(expr__)
 #endif // defined defined SXT_ASSERT
 
-#if (!(defined SXR_MOVE))
-#   include <utility> // for move
-#   define SXR_MOVE ::std::move
-#endif // !defined SXR_MOVE
+#if (!(defined SXT_MOVE))
+#   include <utility>
+#   define SXT_MOVE std::move
+#endif // !defined SXT_MOVE
 
-#define SXT__NEXT_CHAR_WITHOUT_LINECHECK(it__, charcol__) ++(charcol__); ++(it__);// <- a bit slower. 
-//do { ++(charcol__); ++(it__); } while(0) // but..
-#define SXT__NEXT_CHAR_V(it__, itvalue__, charln__, charcol__) if (itvalue__ == '\n') { charcol__ = 0ULL; ++(charln__); } else { ++(charcol__); }  ++(it__);// <- a bit slower.
-//do { if (char_traits_type::eq(itvalue__, '\n')) { charcol__ = 0ULL; ++(charln__); } else { ++(charcol__); }  ++(it__); } while(0) // but..
+#if (!(defined SXT_SIZE_T))
+#   include <cstddef> 
+#   define SXT_SIZE_T std::size_t
+#endif // !defined SXT_SIZE_T
+
+#define SXT__NEXT_CHAR_WITHOUT_LINECHECK(it__, charcol__) ++(charcol__); ++(it__); 
+//do { ++(charcol__); ++(it__); } while(0) // but.. a bit slower. 
+#define SXT__NEXT_CHAR_V(it__, itvalue__, charln__, charcol__) if (itvalue__ == '\n') { charcol__ = 0ULL; ++(charln__); } else { ++(charcol__); }  ++(it__);
+//do { if (char_traits_type::eq(itvalue__, '\n')) { charcol__ = 0ULL; ++(charln__); } else { ++(charcol__); }  ++(it__); } while(0) // but.. a bit slower.
 
 namespace sxt {
     enum token_type {
@@ -164,11 +195,6 @@ namespace sxt {
 
     template<class StringT_>
     struct value_token {
-        public:
-        typedef StringT_& reference;
-        typedef const StringT_& const_reference;
-        typedef typename StringT_::const_iterator const_iterator;
-
         private:
         StringT_ value_;
         token_type type_;
@@ -180,15 +206,15 @@ namespace sxt {
         value_token(token_type type__, const StringT_& str__) : value_(str__), type_(type__) {
 
         }
-        value_token(token_type type__, StringT_&& str__) : value_(SXR_MOVE(str__)), type_(type__) {
+        value_token(token_type type__, StringT_&& str__) : value_(SXT_MOVE(str__)), type_(type__) {
 
         }
 
         public:
-        [[nodiscard]] reference value() noexcept {
+        [[nodiscard]] StringT_& value() noexcept {
             return value_;
         }
-        [[nodiscard]] const_reference value() const noexcept {
+        [[nodiscard]] const StringT_& value() const noexcept {
             return value_;
         }
         [[nodiscard]] token_type type() const noexcept {
@@ -198,26 +224,51 @@ namespace sxt {
             return this_type_is_valid(type_);
         }
     };
+    // https://godbolt.org/ - смотря по сгенерированному коду компилятором, делая так, наследуя, я ничего не теряю даже на -O0
+
+    template<class StringT_>
+    struct position_token : public value_token<StringT_> {
+        private:
+        SXT_SIZE_T line_;
+        SXT_SIZE_T column_;
+
+        public:
+        position_token() : value_token<StringT_>(), line_(0u), column_(0u) {
+
+        }
+        position_token(value_token<StringT_>&& value, SXT_SIZE_T line, SXT_SIZE_T column) : value_token<StringT_>(SXT_MOVE(value)), line_(line), column_(column) {
+
+        }
+
+        public:
+        [[nodiscard]] SXT_SIZE_T line() const noexcept {
+            return line_;
+        }
+        [[nodiscard]] SXT_SIZE_T column() const noexcept {
+            return column_;
+        }
+    };
     /**
      * @brief A tokenizer class that can be configured to split input strings into tokens based on customizable delimiters and traits.
      *
      * @tparam StringT_ type of string to use.
-     * @tparam TokenSymbolsTraitsT_ the type of the token symbols traits. Defaults to SXR_DEFAULT_CHAR_TRAITS<typename StringT_::value_type>.
+     * @tparam TokenSymbolsTraitsT_ the type of the token symbols traits. Defaults to SXT_DEFAULT_CHAR_TRAITS<typename StringT_::value_type>.
      */
     template<class StringT_, class TokenSymbolsTraitsT_ = token_symbols_trait<typename StringT_::value_type>>
     struct tokenizer {
         public:
         typedef typename StringT_::const_iterator const_iterator;
         typedef value_token<StringT_> value_token_type;
+        typedef position_token<StringT_> position_token_type;
         typedef typename StringT_::value_type char_type;
         typedef TokenSymbolsTraitsT_ symbols_trait_type;
 
         private:
-        const_iterator begin_;  /// The beginning iterator of the input range.
-        const_iterator current_;/// The current iterator position in the input range.
-        const_iterator end_;    /// The ending iterator of the input range.
-        size_t line_{0ULL};     /// The current line number in the input range.
-        size_t column_{0ULL};    /// The current column number in the input range.
+        const_iterator begin_;      /// The beginning iterator of the input range.
+        const_iterator current_;    /// The current iterator position in the input range.
+        const_iterator end_;        /// The ending iterator of the input range.
+        SXT_SIZE_T line_{0u};       /// The current line number in the input range.
+        SXT_SIZE_T column_{0u};     /// The current column number in the input range.
 
         public:
         tokenizer() {
@@ -241,7 +292,7 @@ namespace sxt {
          * @return The next token of type value_token_type.
          */
         value_token_type next_new_token(ext_token_type_flag_bits flags) {
-            const auto createNumberToken = [](const_iterator& currentr, size_t& columnr, const_iterator end__, const_iterator b) {
+            const auto createNumberToken = [](const_iterator& currentr, SXT_SIZE_T& columnr, const_iterator end__, const_iterator b) {
                 token_type numberType = STX_TOKEN_TYPE_INTEGER;
                 
                 for (char_type currentValue = *currentr; currentr != end__;  currentValue = *currentr) {
@@ -333,10 +384,26 @@ namespace sxt {
             }
             return value_token_type();
         }
-        [[nodiscard]] size_t line() const noexcept {
+        /**
+         * @brief Retrieves the next token with information about position from the input range.
+         *
+         * @param flags the flags for token type.
+         * @return The next token of type value_token_type.
+         */
+        position_token_type next_position_token(ext_token_type_flag_bits flags) {
+            while (current_ != end_) {
+                auto currentValue = *current_;
+                if (!SXT_ISSAPCE(currentValue)) {
+                    return position_token_type(next_new_token(flags), line_, column_);
+                }
+                SXT__NEXT_CHAR_V(current_, currentValue, line_, column_);
+            }
+            return position_token_type();
+        }
+        [[nodiscard]] SXT_SIZE_T line() const noexcept {
             return line_;
         }
-        [[nodiscard]] size_t column() const noexcept {
+        [[nodiscard]] SXT_SIZE_T column() const noexcept {
             return column_;
         }
         [[nodiscard]] bool eof() const noexcept {

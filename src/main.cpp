@@ -23,6 +23,8 @@
 
 */
 
+#define ERROR_REPORT(msg__) do { std::cout << (std::to_string(ii->line()) + ":" + std::to_string(ii->column()) + ": " + (msg__)); exit(1); } while(false);
+
 #include <iostream>
 #include <string>
 #include <vector>
@@ -35,33 +37,44 @@ constexpr size_t INVALID_PARENT_INDEX = ~0u;
 constexpr size_t INVALID_COMPONENT_INDEX = ~0u;
 
 enum definition_type {
+    DEFINITION_TYPE_STRUCT,
     DEFINITION_TYPE_COMPONENT,
     DEFINITION_TYPE_MEMBER,
-    DEFINITION_TYPE_ID,
     DEFINITION_TYPE_FUNCTION,
+    DEFINITION_TYPE_NEW_ID,
+    DEFINITION_TYPE_FOREACH_CICLE,
+    DEFINITION_TYPE_RCURLY,
     DEFINITION_TYPE_END,
 };
+
 struct definition_info {
     definition_type type;
     string typeSpec;
     string name;
-    size_t parentID; // optional
-    size_t componentID; // optional
+    size_t parentID;
+    size_t componentID;
+    vector<string> supportData;
 };
 
 template<class Iter, class ElseT>
-Iter next_expected(Iter iter, sxt::token_type type, ElseT elseF) {
-    if (iter->type() != type) {
+Iter if_current_not_next(Iter iter, sxt::token_type type, ElseT elseF) {
+    if (iter->type() != type)
         elseF();
-        return iter;
-    }
     return ++iter;
+}
+
+template<class Iter, class ElseT>
+Iter predict_next(Iter iter, sxt::token_type type, ElseT elseF) {
+    ++iter;
+    if (iter->type() != type)
+        elseF();
+    return iter;
 }
 
 string generate_c_start_code(const vector<definition_info>& definitions) {
     size_t componentCount = 0;
     for (const auto& i : definitions) {
-        if (i.componentID != INVALID_COMPONENT_INDEX)
+        if (i.type == DEFINITION_TYPE_COMPONENT)
             ++componentCount;
     }
     return
@@ -78,13 +91,14 @@ string generate_c_start_code(const vector<definition_info>& definitions) {
     "static id_t freeIDs[MAX_ENTITY_COUNT] = {};\n"
     "static size_t freeIDCount = 0;\n";
 }
+
 string generate_c_after_components_definition(const vector<definition_info>& definitions) {
     string destroyComponentSector;
     string addComponentSector;
     string getComponentSector;
     bool firstCompDef = true;
     for (const auto& i : definitions) {
-        if (i.componentID != INVALID_COMPONENT_INDEX) {
+        if (i.type == DEFINITION_TYPE_COMPONENT) {
             const string componentIDStr = std::to_string(i.componentID);
             destroyComponentSector +=
             (firstCompDef ? string("\t\t\t") : string("\t\t\telse ")) + "if (i == " + componentIDStr +") {\n"
@@ -113,7 +127,6 @@ string generate_c_after_components_definition(const vector<definition_info>& def
             "\n";
         }
     }
-
 
     return
     "id_t create() {\n"
@@ -149,22 +162,22 @@ string generate_c_after_components_definition(const vector<definition_info>& def
     + addComponentSector
     + getComponentSector;
 }
+
 string generate_c_destroy_some(const definition_info& definition) {
     if (definition.parentID == INVALID_PARENT_INDEX)
         return "";
     if ((definition.typeSpec == "float") || (definition.typeSpec == "int")) {
         return "(void)__w__->" + definition.name + ";\n";
-    } else  {   
+    } else  {
         return definition.typeSpec + "_destroy(&__w__->" + definition.name + ");\n";
     }
 }
+
 string generate_c_structures(const vector<definition_info>& definitions) {
     string result;
-    size_t currentComponentIndex = INVALID_COMPONENT_INDEX;
     for (size_t i = 0; i < definitions.size(); ++i) {
-        if (definitions[i].componentID != INVALID_COMPONENT_INDEX) {
-            currentComponentIndex = i;
-            const string& name = definitions[currentComponentIndex].name;
+        if ((definitions[i].type == DEFINITION_TYPE_COMPONENT) || (definitions[i].type == DEFINITION_TYPE_STRUCT)) {
+            const string& name = definitions[i].name;
             result += "typedef struct " + name + " {\n";
 
             string destroyMembersSector;
@@ -174,8 +187,8 @@ string generate_c_structures(const vector<definition_info>& definitions) {
                 destroyMembersSector += "\t" + generate_c_destroy_some(definitions[i]);
             }
             --i;
-            
-            result += 
+
+            result +=
             "} "  + name + ";\n"
             "void " + name + "_destroy(" + name + "* __w__) {\n"
             "\t(void)__w__;\n"
@@ -185,58 +198,97 @@ string generate_c_structures(const vector<definition_info>& definitions) {
     }
     return result;
 }
+
 string generate_c_create_ent_with_name(const string& name) {
     return
     "// ent " + name + "\n"
     "const id_t " + name + " = create();\n";
 }
+
 string generate_c_create_add(const string& name, const string& componentName, const vector<definition_info>& definitions) {
     for (const auto& i : definitions) {
-        if (i.componentID != INVALID_COMPONENT_INDEX && i.name == componentName) {
+        if ((i.type == DEFINITION_TYPE_COMPONENT) && (i.name == componentName)) {
             const string strComponentID = std::to_string(i.componentID);
-            return 
+            return
             "// add first " + componentName + ";\n"
             "add_" + componentName +"(" + name + ");\n";
-        } 
+        }
     }
+    std::cout << "component not found\n";
     exit(1);
     return "";
 }
+
 string generate_c_destroy_entity(const string& name, const vector<definition_info>& definitions) {
-    return 
+    return
     "// destroy " + name + ";\n"
     "destroy_entity(" + name + ");\n";
 }
+
 string generate_c_program_exit() {
-    return 
+    return
     "// program exit\n"
     "cleanup();\n";
 }
+
 string generate_c_foreach(const string& iteratorName, const vector<string>& components, const vector<definition_info>& definitions) {
+    if (components.empty()) {
+        return
+        "// foreach " + iteratorName + " [components] { your shitty(my) code }\n"
+        "for (size_t " + iteratorName + " = 0u; " + iteratorName + " < max_id; ++" + iteratorName + ") {\n";
+    }
+
     string checkSector;
     for (size_t ci = 0; ci < components.size(); ++ci) {
         const auto& c = components[ci];
         for (const auto& d : definitions) {
-            if ((d.componentID != INVALID_COMPONENT_INDEX) && (c == d.name)) {
+            if ((d.type == DEFINITION_TYPE_COMPONENT) && (c == d.name)) {
                 const string strComponentID = std::to_string(d.componentID);
                 checkSector += "!componentsData[" + strComponentID + "][" + iteratorName + "].exist" + (ci == (components.size() - 1) ? string("") : string(" || "));
             }
         }
     }
 
-    return 
+    return
     "// foreach " + iteratorName + " [components] { your shitty(my) code }\n"
     "for (size_t " + iteratorName + " = 0u; " + iteratorName + " < max_id; ++" + iteratorName + ") {\n"
-    "\tif (" + checkSector+ ")\n"
-    "\t\tcontinue;\n"
-    "\t\n"
-    "\t//code\n"
-    "}\n";
+    "\tif (" + checkSector + ")\n"
+    "\t\tcontinue;\n";
 }
+
+template<class IterT>
+IterT parse_function(IterT begin, IterT end, vector<definition_info>& definitions, size_t currentFunctionID) {
+    auto ii = begin;
+    for (; (ii != end) && (ii->type() != sxt::STX_TOKEN_TYPE_RCURLY); ++ii) {
+        if (ii->type() == sxt::STX_TOKEN_TYPE_WORD) {
+            if (ii->value() == "ent") {
+                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_NEW_ID, .typeSpec = "", .name = ii->value(), .parentID = currentFunctionID, .componentID = INVALID_COMPONENT_INDEX, .supportData = {}});
+                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_SEMICOLON, [](){exit(1);});
+            } else if (ii->value() == "foreach") {
+                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_FOREACH_CICLE, .typeSpec = "", .name = ii->value(), .parentID = currentFunctionID, .componentID = INVALID_COMPONENT_INDEX, .supportData = {}});
+                ++ii;
+                for (; (ii != end) && (ii->type() != sxt::STX_TOKEN_TYPE_LCURLY); ++ii)
+                    definitions.back().supportData.emplace_back(ii->value());
+                ++ii;
+                ii = parse_function(ii, end, definitions, currentFunctionID);
+                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_RCURLY, .typeSpec = "", .name = "", .parentID = INVALID_PARENT_INDEX, .componentID = INVALID_COMPONENT_INDEX, .supportData = {}});
+
+            } else {
+                ERROR_REPORT("unknown command: " + ii->value() + "\n");
+            }
+        } else {
+            ERROR_REPORT("invalid token type\n");
+        }
+    }
+    return ii;
+}
+
 void parse_definitions(const string& data, vector<definition_info>& definitions) {
     sxt::tokenizer<string> tokenizer(data.begin(), data.end());
-    vector<sxt::value_token<string>> tokens;
-    for (sxt::value_token<string> current = tokenizer.next_new_token(sxt::STX_EXT_TOKEN_TYPE_FLAG_BIT_NONE); current.is_valid(); current = tokenizer.next_new_token(sxt::STX_EXT_TOKEN_TYPE_FLAG_BIT_NONE)) {
+    vector<sxt::position_token<string>> tokens;
+    for (sxt::position_token<string> current = tokenizer.next_position_token(sxt::STX_EXT_TOKEN_TYPE_FLAG_BIT_NONE); current.is_valid(); current = tokenizer.next_position_token(sxt::STX_EXT_TOKEN_TYPE_FLAG_BIT_NONE)) {
         tokens.emplace_back(current);
     }
 
@@ -244,67 +296,124 @@ void parse_definitions(const string& data, vector<definition_info>& definitions)
     size_t componentCount = 0u;
 
     enum {
-        EXPECTED_TYPE_DEFINITION_COMPONENT,
+        EXPECTED_TYPE_DEFINITION,
         EXPECTED_TYPE_COMPONENT_MEMBER_DEFINITION_TYPE,
-    } expected_type = EXPECTED_TYPE_DEFINITION_COMPONENT;
+    } expected_type = EXPECTED_TYPE_DEFINITION;
 
     for (auto ii = tokens.begin(); ii != tokens.end(); ) {
-        const auto& i = *ii;
-        if (expected_type == EXPECTED_TYPE_DEFINITION_COMPONENT) {
-            if (i.type() != sxt::STX_TOKEN_TYPE_WORD)
-                exit(1);
-            if (i.value() != "component")
-                exit(1);
+        if (expected_type == EXPECTED_TYPE_DEFINITION) {
+            if (ii->type() == sxt::STX_TOKEN_TYPE_WORD) {
+                if (ii->value() == "component") {
+                    ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+                    currentComponentID = definitions.size();
+                    definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_COMPONENT, .typeSpec = "", .name = ii->value(), .parentID = INVALID_PARENT_INDEX, .componentID = componentCount++});
+                    ii = if_current_not_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+                    ii = if_current_not_next(ii, sxt::STX_TOKEN_TYPE_LCURLY, [](){exit(1);});
 
-            ++ii;
-            currentComponentID = definitions.size();
-            definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_COMPONENT, .typeSpec = "", .name = ii->value(), .parentID = INVALID_PARENT_INDEX, .componentID = componentCount++});
-            ii = next_expected(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
-            ii = next_expected(ii, sxt::STX_TOKEN_TYPE_LCURLY, [](){exit(1);});
+                    expected_type = EXPECTED_TYPE_COMPONENT_MEMBER_DEFINITION_TYPE;
+                    continue;
+                } else if (ii->value() == "struct") {
+                    ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+                    currentComponentID = definitions.size();
+                    definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_STRUCT, .typeSpec = "", .name = ii->value(), .parentID = INVALID_PARENT_INDEX, .componentID = INVALID_COMPONENT_INDEX});
+                    ii = if_current_not_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+                    ii = if_current_not_next(ii, sxt::STX_TOKEN_TYPE_LCURLY, [](){exit(1);});
 
-            expected_type = EXPECTED_TYPE_COMPONENT_MEMBER_DEFINITION_TYPE;
-            continue;
-
-        } else if (expected_type == EXPECTED_TYPE_COMPONENT_MEMBER_DEFINITION_TYPE) {
-            if (i.type() == sxt::STX_TOKEN_TYPE_WORD)  {
-                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_MEMBER, .typeSpec = i.value(), .name = "", .parentID = currentComponentID, .componentID = INVALID_COMPONENT_INDEX});
-
-                ++ii;
+                    expected_type = EXPECTED_TYPE_COMPONENT_MEMBER_DEFINITION_TYPE;
+                    continue;
+                } else {
+                    exit(1);
+                }
+            } else if (ii->type() == sxt::STX_TOKEN_TYPE_TILDA) {
+                const size_t currentFunctionID = definitions.size();
+                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_FUNCTION, .typeSpec = ii->value(), .name = "", .parentID = INVALID_PARENT_INDEX, .componentID = INVALID_COMPONENT_INDEX, .supportData = {}});
+                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
                 definitions.back().name = ii->value();
-                ii = next_expected(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+
+                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_LPAREN, [](){exit(1);});
+                // arguments parse here
+                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_RPAREN, [](){exit(1);});
+                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_LCURLY, [](){exit(1);});
+
+                // parse code
+                ++ii;
+                ii = parse_function(ii, tokens.end(), definitions, currentFunctionID);
+                ii = if_current_not_next(ii, sxt::STX_TOKEN_TYPE_RCURLY, [](){exit(1);});
+                expected_type = EXPECTED_TYPE_DEFINITION;
+                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_RCURLY, .typeSpec = "", .name = "", .parentID = INVALID_PARENT_INDEX, .componentID = INVALID_COMPONENT_INDEX, .supportData = {}});
+                continue;
+            } else {
+                ERROR_REPORT("unknown token type\n");
+            }
+        } else if (expected_type == EXPECTED_TYPE_COMPONENT_MEMBER_DEFINITION_TYPE) {
+            if (ii->type() == sxt::STX_TOKEN_TYPE_WORD)  {
+                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_MEMBER, .typeSpec = ii->value(), .name = "", .parentID = currentComponentID, .componentID = INVALID_COMPONENT_INDEX, .supportData = {}});
+                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+                definitions.back().name = ii->value();
+                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_SEMICOLON, [](){exit(1);});
+                ++ii;
+
                 expected_type = EXPECTED_TYPE_COMPONENT_MEMBER_DEFINITION_TYPE;
-                ii = next_expected(ii, sxt::STX_TOKEN_TYPE_SEMICOLON, [](){exit(1);});
 
                 continue;
-            } else if (i.type() == sxt::STX_TOKEN_TYPE_RCURLY) {
-                expected_type = EXPECTED_TYPE_DEFINITION_COMPONENT;
+            } else if (ii->type() == sxt::STX_TOKEN_TYPE_RCURLY) {
                 ++ii;
-                ii = next_expected(ii, sxt::STX_TOKEN_TYPE_SEMICOLON, [](){exit(1);});
+                ii = if_current_not_next(ii, sxt::STX_TOKEN_TYPE_SEMICOLON, [](){exit(1);});
+                expected_type = EXPECTED_TYPE_DEFINITION;
 
                 continue;
             } else {
-                exit(1);
+                ERROR_REPORT("unknown token type, maybe you mean '}'?\n");
             }
         }
-        ++ii;
     }
-    definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_END, .typeSpec = "", .name = "", .parentID = INVALID_PARENT_INDEX, .componentID = INVALID_COMPONENT_INDEX}); // eof
+    definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_END, .typeSpec = "", .name = "", .parentID = INVALID_PARENT_INDEX, .componentID = INVALID_COMPONENT_INDEX, .supportData = {}}); // eof
+}
+
+string generate_c_functions(const vector<definition_info>& definitions) {
+    string result;
+    bool inFunction = false;
+    for (const auto& i : definitions) {
+        if (inFunction) {
+            if (i.type == DEFINITION_TYPE_NEW_ID) {
+                result += generate_c_create_ent_with_name(i.name);
+            } else if (i.type == DEFINITION_TYPE_FOREACH_CICLE) {
+                result += generate_c_foreach(i.name, i.supportData, definitions);
+            } else if (i.type == DEFINITION_TYPE_RCURLY) {
+                result += "}\n";
+            } else {
+                inFunction = false;
+            }
+        }
+        else {
+            if (i.type == DEFINITION_TYPE_FUNCTION) {
+                result += i.typeSpec + " " + i.name + "() {\n";
+                inFunction = true;
+            }
+        }
+    }
+    return result;
 }
 
 int main() {
-    string data = "component point { float x; float y; }; component position { point vector; }; component velocity { point vector; };";
-    /*
-        component point { float x; float y; };
-        component position { point vector; };
-        component velocity { point vector; };
+    string data =
+    "struct point {\n"
+    "\tfloat x;\n"
+    "\tfloat y;\n"
+    "};\n"
+    "component position {\n"
+    "\tpoint vector;\n"
+    "\t}\n;"
+    "component velocity {\n"
+    "\tpoint vector;\n"
+    "\t}\n;"
+    "\n"
+    "~int main() {\n"
+    "\tent first;\n"
+    "\nforeach entity { ent a; }\n"
+    "}\n";
 
-        fn main() {
-            ent first
-            add first position
-            add first velocity
-            destroy first
-        }
-    */
     sxt::tokenizer<string> tokenizer(data.begin(), data.end());
     vector<sxt::value_token<string>> tokens;
     for (sxt::value_token<string> current = tokenizer.next_new_token(sxt::STX_EXT_TOKEN_TYPE_FLAG_BIT_NONE); current.is_valid(); current = tokenizer.next_new_token(sxt::STX_EXT_TOKEN_TYPE_FLAG_BIT_NONE)) {
@@ -316,19 +425,13 @@ int main() {
     size_t componentCount = 0u;
 
     parse_definitions(data, definitions);
-    // for (const auto& i : definitions) {
-    //     std::cout << i.name << " parent: " << (i.parentID == INVALID_PARENT_INDEX ? "null" : definitions[i.parentID].name) << '\n';
-    // }
+    for (const auto& i : definitions) {
+        std::cout << i.name << " parent: " << (i.parentID == INVALID_PARENT_INDEX ? "null" : definitions[i.parentID].name) << '\n';
+    }
     std::cout << generate_c_start_code(definitions);
     std::cout << generate_c_structures(definitions);
     std::cout << generate_c_after_components_definition(definitions);
-    std::cout << "int main() {\n";
-    std::cout << generate_c_create_ent_with_name("first");
-    std::cout << generate_c_create_add("first", "position", definitions);
-    std::cout << generate_c_create_add("first", "velocity", definitions);
-    std::cout << generate_c_foreach("entity", {"position", "velocity"}, definitions);
-    std::cout << generate_c_destroy_entity("first", definitions);
-    std::cout << generate_c_program_exit();
-    std::cout << "}";
+    std::cout << generate_c_functions(definitions);
+
     return 0;
 }
