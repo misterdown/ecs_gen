@@ -444,6 +444,7 @@ void parse_definitions(const string& data, vector<definition_info>& definitions)
                 ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
                 const auto& name = ii->value();
 
+
                 definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_FUNCTION, .opcode = { returnTypename, name } });
 
                 ii = predict_next(ii, sxt::STX_TOKEN_TYPE_LPAREN, [](){exit(1);});
@@ -452,12 +453,23 @@ void parse_definitions(const string& data, vector<definition_info>& definitions)
 
                 ii = predict_next(ii, sxt::STX_TOKEN_TYPE_RPAREN, [](){exit(1);});
 
+                // ii = predict_next(ii, sxt::STX_TOKEN_TYPE_LCURLY, [](){exit(1);});
+                // ii = parse_function(ii, tokens.end(), variableContext, definitions);
+                // definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_BODY_END, .opcode = { } });
+                // ++ii;
+
                 ++ii;
-                ii = parse_function(ii, tokens.end(), variableContext, definitions);
-                ++ii;
+                if (ii->type() == sxt::STX_TOKEN_TYPE_LCURLY) {
+                    ii = parse_function(ii, tokens.end(), variableContext, definitions);
+                    definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_BODY_END, .opcode = { } });
+                    ++ii;
+                } else if (ii->type() == sxt::STX_TOKEN_TYPE_SEMICOLON) {
+                    ++ii;
+                } else {
+                    ERROR_REPORT(ii->value() + " - unknown token type, maybe you mean `{`?\n");
+                }
 
                 expected_type = EXPECTED_TYPE_DEFINITION;
-                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_BODY_END, .opcode = { } });
                 continue;
             } else {
                 ERROR_REPORT("unknown token type\n");
@@ -492,28 +504,34 @@ void parse_definitions(const string& data, vector<definition_info>& definitions)
 string generate_c_functions(const vector<definition_info>& definitions) {
     string result;
     bool inFunction = false;
-    for (const auto& i : definitions) {
-        if (i.type == DEFINITION_TYPE_BODY_BEGIN) {
+    for (size_t i = 0u; i < definitions.size(); ++i) {
+        const definition_info& definition = definitions[i];
+
+        if (definition.type == DEFINITION_TYPE_BODY_BEGIN) {
             result += "{\n";
-        } else if (i.type == DEFINITION_TYPE_BODY_END) {
+        } else if (definition.type == DEFINITION_TYPE_BODY_END) {
             result += "}\n";
         } else if (inFunction) {
-            if (i.type == DEFINITION_TYPE_CREATE) {
-                result += generate_c_create_ent_with_name(i.opcode.at(0));
-            } else if (i.type == DEFINITION_TYPE_FOREACH_CYCLE) {
-                result += generate_c_foreach(i, definitions);
-            } else if (i.type == DEFINITION_TYPE_ADD_COMPONENTS) {
-                result += generate_c_add_coponents(i, definitions);
-            } else if (i.type == DEFINITION_TYPE_DESTROY_ENTITY) {
-                result += generate_c_destroy_entity(i.opcode.at(0));
+            if (definition.type == DEFINITION_TYPE_CREATE) {
+                result += generate_c_create_ent_with_name(definition.opcode.at(0));
+            } else if (definition.type == DEFINITION_TYPE_FOREACH_CYCLE) {
+                result += generate_c_foreach(definition, definitions);
+            } else if (definition.type == DEFINITION_TYPE_ADD_COMPONENTS) {
+                result += generate_c_add_coponents(definition, definitions);
+            } else if (definition.type == DEFINITION_TYPE_DESTROY_ENTITY) {
+                result += generate_c_destroy_entity(definition.opcode.at(0));
             } else {
                 inFunction = false;
             }
         }
         else {
-            if (i.type == DEFINITION_TYPE_FUNCTION) {
-                result += i.opcode.at(0) + " " + i.opcode.at(1) + "() ";
-                inFunction = true;
+            if (definition.type == DEFINITION_TYPE_FUNCTION) {
+                result += definition.opcode.at(0) + " " + definition.opcode.at(1) + "() ";
+                if ((i == (definitions.size() - 1)) || (definitions[i + 1].type != DEFINITION_TYPE_BODY_BEGIN)) {
+                    result += ";\n";
+                } else {
+                    inFunction = true;
+                }
             }
         }
     }
@@ -533,6 +551,7 @@ int main() {
     "\tpoint vector;\n"
     "\t}\n;"
     "\n"
+    "~int main();\n"
     "~int main() {\n"
     "\tent first;\n"
     "\tfirst.add<position, velocity>();\n"
@@ -551,13 +570,13 @@ int main() {
 
     parse_definitions(data, definitions);
     // print "IR"
-    /* for (const auto& i : definitions) {
-        cout << definition_type_to_string(i.type) << ' ';
-        for (const auto& opcode : i.opcode) {
-            cout << opcode << ' ';
-        }
-        cout << ";\n";
-    } */
+    // for (const auto& i : definitions) {
+    //     cout << definition_type_to_string(i.type) << ' ';
+    //     for (const auto& opcode : i.opcode) {
+    //         cout << opcode << ' ';
+    //     }
+    //     cout << ";\n";
+    // }
     cout << generate_c_start_code(definitions);
     cout << generate_c_structures(definitions);
     cout << generate_c_after_components_definition(definitions);
