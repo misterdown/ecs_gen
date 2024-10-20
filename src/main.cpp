@@ -26,10 +26,23 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <algorithm>
 #include <sxt_head.hpp>
 
 using std::string;
 using std::vector;
+using std::cout;
+using std::to_string;
+
+// useful only in C++11
+template <class IterT, class FindT, class PredT>
+IterT find_pred(IterT begin, const IterT end, const FindT& value, PredT pred) {
+    for (;begin != end; ++begin) {
+        if (pred(*begin, value))
+            return begin;
+    }
+    return end;
+}
 
 enum definition_type {
     DEFINITION_TYPE_STRUCT,         // opcode [ NAME ]
@@ -37,6 +50,8 @@ enum definition_type {
     DEFINITION_TYPE_MEMBER,         // opcode [ TYPENAME NAME ]
     DEFINITION_TYPE_FUNCTION,       // opcode [ RETURN_TYPENAME NAME ARGS... ]
     DEFINITION_TYPE_CREATE,         // opcode [ NAME ]
+    DEFINITION_TYPE_ADD_COMPONENTS, // opcode [ NAME COMPONENTS... ]
+    DEFINITION_TYPE_DESTROY_ENTITY, // opcode [ NAME ]
     DEFINITION_TYPE_FOREACH_CYCLE,  // opcode [ ITERATOR_NAME COMPONENTS... ]
     DEFINITION_TYPE_BODY_BEGIN,     // opcode [ ]
     DEFINITION_TYPE_BODY_END,       // opcode [ ]
@@ -44,15 +59,18 @@ enum definition_type {
 };
 const char* definition_type_to_string(definition_type deft) {
     switch (deft) {
-    case DEFINITION_TYPE_STRUCT: return         "STRUCT";
-    case DEFINITION_TYPE_COMPONENT: return      "COMPONENT";
-    case DEFINITION_TYPE_MEMBER: return         "MEMBER";
-    case DEFINITION_TYPE_FUNCTION: return       "FUNCTION";
-    case DEFINITION_TYPE_CREATE: return         "CREATE";
-    case DEFINITION_TYPE_FOREACH_CYCLE: return  "FOREACH";
-    case DEFINITION_TYPE_BODY_BEGIN: return     "BODY_BEGIN";
-    case DEFINITION_TYPE_BODY_END: return       "BODY_END";
-    default: return                             "PROGRAM_END";
+        case DEFINITION_TYPE_STRUCT: return         "STRUCT";
+        case DEFINITION_TYPE_COMPONENT: return      "COMPONENT";
+        case DEFINITION_TYPE_MEMBER: return         "MEMBER";
+        case DEFINITION_TYPE_FUNCTION: return       "FUNCTION";
+        case DEFINITION_TYPE_CREATE: return         "CREATE";
+        case DEFINITION_TYPE_ADD_COMPONENTS: return "ADD_COMPONENTS";
+        case DEFINITION_TYPE_DESTROY_ENTITY: return "DESTROY_ENTITY";
+        case DEFINITION_TYPE_FOREACH_CYCLE: return  "FOREACH";
+        case DEFINITION_TYPE_BODY_BEGIN: return     "BODY_BEGIN";
+        case DEFINITION_TYPE_BODY_END: return       "BODY_END";
+        case DEFINITION_TYPE_EOF: return            "PROGRAM_END";
+        default: return "";
     }
 }
 
@@ -60,9 +78,13 @@ struct definition_info {
     definition_type type;
     vector<string> opcode;
 };
+struct variable_info {
+    string typeName;
+    string name;
+};
 
 #define ERROR_REPORT(msg__) do { \
-    std::cout << (std::to_string(ii->line()) + ":" + std::to_string(ii->column()) + ": " + (msg__)); \
+    cout << (to_string(ii->line()) + ":" + to_string(ii->column()) + ": " + (msg__)); \
     exit(1); \
 } while(false)
 
@@ -82,17 +104,18 @@ string generate_c_start_code(const vector<definition_info>& definitions) {
     }
     return
     "#include <malloc.h>\n"
-    "#define COMPONENT_COUNT " + std::to_string(componentCount) + "\n"
+    "#define COMPONENT_COUNT " + to_string(componentCount) + "\n"
     "#define MAX_ENTITY_COUNT 1024\n"
-    "typedef size_t id_t;\n"
+    "typedef size_t entity_t;\n"
     "typedef struct component_info {\n"
     "\tint exist;\n"
     "\tchar* data;\n"
     "\tsize_t dataSize;\n"
     "} component_info;\n"
     "static component_info componentsData[COMPONENT_COUNT][MAX_ENTITY_COUNT] = {};\n"
-    "static id_t max_id = 0;\n"
-    "static id_t freeIDs[MAX_ENTITY_COUNT] = {};\n"
+    "static int existMask[MAX_ENTITY_COUNT] = {};\n"
+    "static entity_t max_id = 0;\n"
+    "static entity_t freeIDs[MAX_ENTITY_COUNT] = {};\n"
     "static size_t freeIDCount = 0;\n";
 }
 
@@ -112,8 +135,9 @@ string generate_c_after_components_definition(const vector<definition_info>& def
             firstCompDef = false;
 
             addComponentSector +=
-            "void add_" + name+ "(id_t entity) {\n"
+            "void add_" + name+ "(entity_t entity) {\n"
             "\tcomponentsData[" + componentIDStr + "][entity].exist = 1;\n"
+            "\texistMask[entity] = 1;\n"
             "\tif (componentsData[" + componentIDStr + "][entity].data == 0) {\n"
             "\t\tcomponentsData[" + componentIDStr + "][entity].data = malloc(sizeof(" + name + "));\n"
             "\t\tcomponentsData[" + componentIDStr + "][entity].dataSize = sizeof(" + name + ");\n"
@@ -124,7 +148,7 @@ string generate_c_after_components_definition(const vector<definition_info>& def
             "\n";
 
             getComponentSector +=
-            name+ "* get_" + name + "(id_t entity) {\n"
+            name + "* get_" + name + "(entity_t entity) {\n"
             "\tif (componentsData[" + componentIDStr + "][entity].exist == 0)\n"
             "\t\treturn 0;\n"
             "\treturn (" + name + "*)componentsData[" + componentIDStr + "][entity].data;\n"
@@ -134,7 +158,7 @@ string generate_c_after_components_definition(const vector<definition_info>& def
     }
 
     return
-    "id_t create() {\n"
+    "entity_t create() {\n"
     "\tif (freeIDCount == 0) {\n"
     "\t\treturn max_id++;\n"
     "\t} else {\n"
@@ -143,7 +167,8 @@ string generate_c_after_components_definition(const vector<definition_info>& def
     "\t}\n"
     "}\n"
     "\n"
-    "void destroy_entity(id_t entity) {\n"
+    "void destroy_entity(entity_t entity) {\n"
+    "\texistMask[entity] = 0;\n"
     "\tfor (size_t i = 0u; i < COMPONENT_COUNT; ++i) {\n"
     "\t\tif (componentsData[i][entity].exist) {\n"
     "\t\t\tcomponentsData[i][entity].exist = 0;\n"
@@ -179,7 +204,7 @@ string generate_c_destroy_some(const definition_info& definition) {
             return typeName + "_destroy(&__w__->" + name + ");\n";
         }
     } else {
-        std::cout << "invalid definition\n";
+        cout << "invalid definition\n";
         exit(1);
     }
 }
@@ -216,27 +241,41 @@ string generate_c_structures(const vector<definition_info>& definitions) {
 string generate_c_create_ent_with_name(const string& name) {
     return
     "// ent " + name + "\n"
-    "const id_t " + name + " = create();\n";
+    "const entity_t " + name + " = create();\n";
 }
 
-string generate_c_create_add(const string& name, const string& componentName, const vector<definition_info>& definitions) {
-    for (const auto& i : definitions) {
-        if ((i.type == DEFINITION_TYPE_COMPONENT) && (i.opcode.at(0) == componentName)) {
-            const auto& name = i.opcode.at(0);
-            const auto& strComponentID = i.opcode.at(1);
-            return
-            "// add first " + componentName + ";\n"
-            "add_" + componentName +"(" + name + ");\n";
+string generate_c_add_coponents(const definition_info& addDefinition, const vector<definition_info>& definitions) {
+    string result;
+    const auto& entityName = addDefinition.opcode.at(0);
+    
+    for (size_t j = 1; j < addDefinition.opcode.size(); ++j) {
+        const auto& componentName = addDefinition.opcode[j];
+        bool found = false;
+
+        for (const auto& i : definitions) {
+            if ((i.type == DEFINITION_TYPE_COMPONENT) && (i.opcode.at(0) == componentName)) {
+                found = true;
+                const auto& name = i.opcode.at(0);
+                const auto& strComponentID = i.opcode.at(1);
+                result +=
+                "// add first " + componentName + "\n"
+                "add_" + componentName +"(" + entityName + ");\n";
+                break;
+            }
+        }
+        if (!found) {
+            cout << "component not found\n";
+            exit(1);
         }
     }
-    std::cout << "component not found\n";
-    exit(1);
-    return "";
+
+    
+    return result;
 }
 
-string generate_c_destroy_entity(const string& name, const vector<definition_info>& definitions) {
+string generate_c_destroy_entity(const string& name) {
     return
-    "// destroy " + name + ";\n"
+    "// destroy " + name + "\n"
     "destroy_entity(" + name + ");\n";
 }
 
@@ -251,7 +290,8 @@ string generate_c_foreach(const definition_info& foreachDefinition, const vector
     if (foreachDefinition.opcode.size() < 2) {
         return
         "// foreach " + iteratorName + " [components] { your shitty(my) code }\n"
-        "for (size_t " + iteratorName + " = 0u; " + iteratorName + " < max_id; ++" + iteratorName + ") ";
+        "for (entity_t " + iteratorName + " = 0u; " + iteratorName + " < max_id; ++" + iteratorName + ")\n"
+        "\tif (existMask[" + iteratorName + "]) ";
     }
     string checkSector;
     for (size_t ci = 1; ci < foreachDefinition.opcode.size(); ++ci) {
@@ -260,43 +300,93 @@ string generate_c_foreach(const definition_info& foreachDefinition, const vector
         for (const auto& d : definitions) {
             if ((d.type == DEFINITION_TYPE_COMPONENT) && (component == d.opcode.at(0))) {
                 const string strComponentID = d.opcode.at(1);
-                checkSector += "!componentsData[" + strComponentID + "][" + iteratorName + "].exist" + (ci == (foreachDefinition.opcode.size() - 1) ? string("") : string(" || "));
+                checkSector += "componentsData[" + strComponentID + "][" + iteratorName + "].exist" + (ci == (foreachDefinition.opcode.size() - 1) ? string("") : string(" && "));
+                break;
             }
         }
     }
 
     return
     "// foreach " + iteratorName + " [components] { your shitty(my) code }\n"
-    "for (size_t " + iteratorName + " = 0u; " + iteratorName + " < max_id; ++" + iteratorName + ")\n"
-    "\tif (" + checkSector + ") "
-    "\t\tcontinue;\n"
-    "\telse";
+    "for (entity_t " + iteratorName + " = 0u; " + iteratorName + " < max_id; ++" + iteratorName + ")\n"
+    "\tif (" + checkSector + ") ";
 }
 
 template<class IterT>
-IterT parse_function(IterT begin, IterT end, vector<definition_info>& definitions) {
+IterT parse_function(IterT begin, IterT end, vector<variable_info>& variableContext, vector<definition_info>& definitions) {
     auto ii = begin;
     for (; (ii != end) && (ii->type() != sxt::STX_TOKEN_TYPE_RCURLY) && (ii->type() != sxt::STX_TOKEN_TYPE_SEMICOLON); ++ii) {
         if (ii->type() == sxt::STX_TOKEN_TYPE_WORD) {
             if (ii->value() == "ent") {
                 ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+
                 const auto& name = ii->value();
                 definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_CREATE, .opcode = { name }});
+                variableContext.emplace_back(variable_info{.typeName = "ent", .name = name});
+
                 ii = predict_next(ii, sxt::STX_TOKEN_TYPE_SEMICOLON, [](){exit(1);});
             } else if (ii->value() == "foreach") {
                 ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
-                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_FOREACH_CYCLE, .opcode = { ii->value() }});
-                auto& foreachDefinition = definitions.back();
+
+                const auto& iteratorName = ii->value();
+                definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_FOREACH_CYCLE, .opcode = { iteratorName }});
+
+                definition_info& foreachDefinition = definitions.back();
+                variableContext.emplace_back(variable_info{.typeName = "ent", .name = iteratorName});
+
                 ++ii;
                 for (; (ii != end) && (ii->type() != sxt::STX_TOKEN_TYPE_LCURLY); ++ii)
                     foreachDefinition.opcode.emplace_back(ii->value());
                 ++ii;
+
                 definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_BODY_BEGIN, .opcode = { }});
-                ii = parse_function(ii, end, definitions);
+                ii = parse_function(ii, end, variableContext, definitions);
                 definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_BODY_END, .opcode = { }});
 
             } else {
-                ERROR_REPORT("unknown command: " + ii->value() + "\n");
+                const auto maybeVariable = find_pred(variableContext.begin(), variableContext.end(), ii->value(),
+                    [](const variable_info& info1, const string& name) {
+                        return info1.name == name;
+                    });
+
+                if (maybeVariable == variableContext.end())
+                    ERROR_REPORT("unknown variable name: " + ii->value() + "\n");
+
+                const variable_info& variable = *maybeVariable;
+                if (variable.typeName == "ent") {
+                    ii = predict_next(ii, sxt::STX_TOKEN_TYPE_DOT, [](){exit(1);});
+                    ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+                    const auto& methodName = *ii;
+                    if (methodName.value() == "add") {
+                        ii = predict_next(ii, sxt::STX_TOKEN_TYPE_LESS, [](){exit(1);});
+                        ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
+
+                        definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_ADD_COMPONENTS, .opcode = { variable.name }});
+                        definition_info& addComponentDefinition = definitions.back();
+
+                        for (;; ++ii) {
+                            if (ii == end)
+                                ERROR_REPORT("EOF while parsing 'add' method\n");
+                            addComponentDefinition.opcode.emplace_back(ii->value());
+                            ++ii;
+
+                            if (ii->type() == sxt::STX_TOKEN_TYPE_MORE) {
+                                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_LPAREN, [](){exit(1);});
+                                ii = predict_next(ii, sxt::STX_TOKEN_TYPE_RPAREN, [](){exit(1);});
+                                break;
+                            } else if (ii->type() == sxt::STX_TOKEN_TYPE_COMMA) {
+                                continue;
+                            } else {
+                                ERROR_REPORT("invalid add components syntax\n");
+                            }
+                        }
+                    } else if (methodName.value() == "destroy") {
+                        ii = predict_next(ii, sxt::STX_TOKEN_TYPE_LPAREN, [](){exit(1);});
+                        ii = predict_next(ii, sxt::STX_TOKEN_TYPE_RPAREN, [](){exit(1);});
+                        definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_DESTROY_ENTITY, .opcode = { variable.name }});
+                    }
+                    ii = predict_next(ii, sxt::STX_TOKEN_TYPE_SEMICOLON, [](){exit(1);});
+                }
             }
         } else if (ii->type() == sxt::STX_TOKEN_TYPE_LCURLY) {
             definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_BODY_BEGIN, .opcode = { }});
@@ -321,13 +411,15 @@ void parse_definitions(const string& data, vector<definition_info>& definitions)
         EXPECTED_TYPE_COMPONENT_MEMBER_DEFINITION_TYPE,
     } expected_type = EXPECTED_TYPE_DEFINITION;
 
+    vector<variable_info> variableContext;
+
     for (auto ii = tokens.begin(); ii != tokens.end(); ) {
         if (expected_type == EXPECTED_TYPE_DEFINITION) {
             if (ii->type() == sxt::STX_TOKEN_TYPE_WORD) {
                 if (ii->value() == "component") {
                     ii = predict_next(ii, sxt::STX_TOKEN_TYPE_WORD, [](){exit(1);});
                     const auto& name = ii->value();
-                    definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_COMPONENT, .opcode = { name, std::to_string(componentCount) }});
+                    definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_COMPONENT, .opcode = { name, to_string(componentCount) }});
                     ++componentCount;
                     ii = predict_next(ii, sxt::STX_TOKEN_TYPE_LCURLY, [](){exit(1);});
                     ++ii;
@@ -355,13 +447,15 @@ void parse_definitions(const string& data, vector<definition_info>& definitions)
                 definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_FUNCTION, .opcode = { returnTypename, name } });
 
                 ii = predict_next(ii, sxt::STX_TOKEN_TYPE_LPAREN, [](){exit(1);});
+
                 // arguments parse here, TODO
+
                 ii = predict_next(ii, sxt::STX_TOKEN_TYPE_RPAREN, [](){exit(1);});
 
-                // parse code
                 ++ii;
-                ii = parse_function(ii, tokens.end(), definitions);
+                ii = parse_function(ii, tokens.end(), variableContext, definitions);
                 ++ii;
+
                 expected_type = EXPECTED_TYPE_DEFINITION;
                 definitions.emplace_back(definition_info{.type = DEFINITION_TYPE_BODY_END, .opcode = { } });
                 continue;
@@ -408,6 +502,10 @@ string generate_c_functions(const vector<definition_info>& definitions) {
                 result += generate_c_create_ent_with_name(i.opcode.at(0));
             } else if (i.type == DEFINITION_TYPE_FOREACH_CYCLE) {
                 result += generate_c_foreach(i, definitions);
+            } else if (i.type == DEFINITION_TYPE_ADD_COMPONENTS) {
+                result += generate_c_add_coponents(i, definitions);
+            } else if (i.type == DEFINITION_TYPE_DESTROY_ENTITY) {
+                result += generate_c_destroy_entity(i.opcode.at(0));
             } else {
                 inFunction = false;
             }
@@ -437,7 +535,9 @@ int main() {
     "\n"
     "~int main() {\n"
     "\tent first;\n"
-    "\nforeach entity { ent a; }\n"
+    "\tfirst.add<position, velocity>();\n"
+    "\tfirst.destroy();\n"
+    "\nforeach entity position { entity.destroy(); }\n"
     "}\n";
 
     sxt::tokenizer<string> tokenizer(data.begin(), data.end());
@@ -450,18 +550,18 @@ int main() {
     size_t componentCount = 0u;
 
     parse_definitions(data, definitions);
-    // print IR
-    /*for (const auto& i : definitions) {
-        std::cout << definition_type_to_string(i.type) << ' ';
+    // print "IR"
+    /* for (const auto& i : definitions) {
+        cout << definition_type_to_string(i.type) << ' ';
         for (const auto& opcode : i.opcode) {
-            std::cout << opcode << ' ';
+            cout << opcode << ' ';
         }
-        std::cout << ";\n";
-    }*/
-    std::cout << generate_c_start_code(definitions);
-    std::cout << generate_c_structures(definitions);
-    std::cout << generate_c_after_components_definition(definitions);
-    std::cout << generate_c_functions(definitions);
+        cout << ";\n";
+    } */
+    cout << generate_c_start_code(definitions);
+    cout << generate_c_structures(definitions);
+    cout << generate_c_after_components_definition(definitions);
+    cout << generate_c_functions(definitions);
 
     return 0;
 }
